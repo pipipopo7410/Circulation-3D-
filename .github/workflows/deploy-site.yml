@@ -1,12 +1,11 @@
-name: Deploy Blood 3D website from verified ZIP
+name: Deploy circulation 3D (latest version ZIP)
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - 'Circulation-3D-v0.47-GitHub-Pages.zip'
+      - 'Circulation-3D-v*-GitHub-Pages.zip'
       - '.github/workflows/deploy-site.yml'
 
 permissions:
@@ -15,71 +14,52 @@ permissions:
   id-token: write
 
 concurrency:
-  group: blood-3d-pages
+  group: circulation-3d-pages
   cancel-in-progress: true
 
 jobs:
   prepare:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Prepare GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Extract and verify every website asset
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Extract latest complete website and verify every file
         shell: bash
         run: |
           set -euo pipefail
-          FILE='Circulation-3D-v0.47-GitHub-Pages.zip'
-          if [ ! -s "$FILE" ]; then
-            echo 'ERROR: Missing website ZIP in repository root'
-            exit 1
-          fi
+          FILE="$(find . -maxdepth 1 -type f -name 'Circulation-3D-v*-GitHub-Pages.zip' -printf '%f\n' | sort -V | tail -n1)"
+          if [ -z "$FILE" ]; then echo 'No site ZIP found'; exit 1; fi
+          echo "Selected: $FILE"
           mkdir -p _site
           python3 -m zipfile -e "$FILE" _site
-          python3 - <<'PY'
-          import hashlib, json
+          SITE_ZIP="$FILE" python3 - <<'PY'
+          import os,re,json,hashlib
           from pathlib import Path
-          root = Path('_site')
-          manifest_path = root / 'asset-manifest.json'
-          if not manifest_path.is_file():
-              raise SystemExit('ERROR: asset-manifest.json not at ZIP root')
-          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-          if manifest.get('version') != 'V0.47':
-              raise SystemExit('ERROR: Wrong version: ' + str(manifest.get('version')))
-          files = manifest.get('files', {})
-          if len(files) != 38:
-              raise SystemExit(f'ERROR: Expected 38 assets, found {len(files)}')
-          for relative, meta in files.items():
-              path = root / relative
-              if not path.is_file():
-                  raise SystemExit('ERROR: Missing ' + relative)
-              data = path.read_bytes()
-              if len(data) != meta['bytes']:
-                  raise SystemExit('ERROR: Invalid file size: ' + relative)
-              if hashlib.sha256(data).hexdigest() != meta['sha256']:
-                  raise SystemExit('ERROR: Hash mismatch: ' + relative)
-          required = [
-              'index.html', 'js/viewer.js',
-              'models/arteries-core-only.glb', 'models/veins-core-only.glb',
-              'models/arteries-main-extra.glb', 'models/veins-main-extra.glb',
-              'models/arteries-fine-extra.glb', 'models/veins-fine-extra.glb',
-              'vendor/three/build/three.module.js',
-              'vendor/three/examples/jsm/libs/draco/draco_decoder.wasm',
-          ]
-          for relative in required:
-              if not (root / relative).is_file():
-                  raise SystemExit('ERROR: Missing deployment essential: ' + relative)
-          print(f'PASS: V0.47 / {len(files)} assets checksum verified, including 6 GLBs, Three.js and Draco')
+          name=os.environ['SITE_ZIP']
+          match=re.fullmatch(r'Circulation-3D-v(\d+)\.(\d+)-GitHub-Pages\.zip',name)
+          if not match:raise SystemExit('Invalid site ZIP filename: '+name)
+          expected=f'V{int(match[1])}.{int(match[2]):02d}'
+          root=Path('_site')
+          manifest=json.loads((root/'asset-manifest.json').read_text(encoding='utf-8'))
+          if manifest.get('version')!=expected:raise SystemExit(f'Wrong version: {manifest.get("version")} vs {expected}')
+          files=manifest.get('files',{})
+          if len(files)<39:raise SystemExit(f'Manifest unexpectedly small: {len(files)}')
+          for relative,meta in files.items():
+              path=root/relative
+              if not path.is_file():raise SystemExit('Missing '+relative)
+              b=path.read_bytes()
+              if len(b)!=meta['bytes'] or hashlib.sha256(b).hexdigest()!=meta['sha256']:
+                  raise SystemExit('Mismatch '+relative)
+          critical=['index.html','js/viewer.js','js/body-context.mjs','models/arteries-core-only.glb','models/veins-core-only.glb',
+                    'models/arteries-main-extra.glb','models/veins-main-extra.glb','models/arteries-fine-extra.glb','models/veins-fine-extra.glb',
+                    'vendor/three/build/three.module.js','vendor/three/examples/jsm/libs/draco/draco_decoder.wasm']
+          for relative in critical:
+              if not (root/relative).is_file():raise SystemExit('Missing critical file '+relative)
+          print(f'PASS {expected} / {len(files)} assets / 6 GLBs / Three.js / Draco')
           PY
-
-      - name: Upload complete website to Pages
-        uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: _site
-
   deploy:
     needs: prepare
     runs-on: ubuntu-latest
