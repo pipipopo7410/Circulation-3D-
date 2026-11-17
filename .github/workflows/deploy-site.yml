@@ -1,0 +1,95 @@
+name: Deploy Blood 3D website from verified ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Circulation-3D-v0.47-GitHub-Pages.zip'
+      - '.github/workflows/deploy-site.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: blood-3d-pages
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Extract and verify every website asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE='Circulation-3D-v0.47-GitHub-Pages.zip'
+          if [ ! -s "$FILE" ]; then
+            echo 'ERROR: Missing website ZIP in repository root'
+            exit 1
+          fi
+          mkdir -p _site
+          python3 -m zipfile -e "$FILE" _site
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          root = Path('_site')
+          manifest_path = root / 'asset-manifest.json'
+          if not manifest_path.is_file():
+              raise SystemExit('ERROR: asset-manifest.json not at ZIP root')
+          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+          if manifest.get('version') != 'V0.47':
+              raise SystemExit('ERROR: Wrong version: ' + str(manifest.get('version')))
+          files = manifest.get('files', {})
+          if len(files) != 38:
+              raise SystemExit(f'ERROR: Expected 38 assets, found {len(files)}')
+          for relative, meta in files.items():
+              path = root / relative
+              if not path.is_file():
+                  raise SystemExit('ERROR: Missing ' + relative)
+              data = path.read_bytes()
+              if len(data) != meta['bytes']:
+                  raise SystemExit('ERROR: Invalid file size: ' + relative)
+              if hashlib.sha256(data).hexdigest() != meta['sha256']:
+                  raise SystemExit('ERROR: Hash mismatch: ' + relative)
+          required = [
+              'index.html', 'js/viewer.js',
+              'models/arteries-core-only.glb', 'models/veins-core-only.glb',
+              'models/arteries-main-extra.glb', 'models/veins-main-extra.glb',
+              'models/arteries-fine-extra.glb', 'models/veins-fine-extra.glb',
+              'vendor/three/build/three.module.js',
+              'vendor/three/examples/jsm/libs/draco/draco_decoder.wasm',
+          ]
+          for relative in required:
+              if not (root / relative).is_file():
+                  raise SystemExit('ERROR: Missing deployment essential: ' + relative)
+          print(f'PASS: V0.47 / {len(files)} assets checksum verified, including 6 GLBs, Three.js and Draco')
+          PY
+
+      - name: Upload complete website to Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
